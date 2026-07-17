@@ -14,7 +14,7 @@ import (
 func callCAdd(addr uintptr, a, b int32) int32
 
 func main() {
-	file := "example/libadd.so"
+	file := "lib/libadd.so"
 	if len(os.Args) > 1 {
 		file = os.Args[1]
 	}
@@ -25,6 +25,26 @@ func main() {
 	}
 	defer f.Close()
 
+	// Find address of the "add" function
+	symbols, err := f.Symbols()
+	if err != nil {
+		log.Fatalf("Failed to read symbols: %v", err)
+	}
+	var funcOffset uint64
+	found := false
+	for _, sym := range symbols {
+		if sym.Name == "add" {
+			// sym.Value is the relative offset from the start of the file
+			funcOffset = sym.Value
+			found = true
+			break
+		}
+	}
+	if !found {
+		log.Fatalf("Symbol 'add' not found in ELF file")
+	}
+
+	// Compute required page size for library
 	reqSize := uint64(0)
 	for i, prog := range f.Progs {
 		if prog.Type != elf.PT_LOAD {
@@ -39,6 +59,7 @@ func main() {
 		)
 	}
 
+	// Request page from OS
 	pageSize := os.Getpagesize()
 	numPages := (reqSize + uint64(pageSize) - 1) / uint64(pageSize)
 	memSlice, err := syscall.Mmap(
@@ -52,6 +73,7 @@ func main() {
 		log.Fatalf("Failed to mmap memory: %v", err)
 	}
 
+	// Read shared library into page
 	for _, prog := range f.Progs {
 		if prog.Type != elf.PT_LOAD {
 			continue
@@ -64,32 +86,10 @@ func main() {
 		io.ReadFull(prog.Open(), memSlice[start:end])
 	}
 
+	// Mark page as executable
 	err = syscall.Mprotect(memSlice, syscall.PROT_READ|syscall.PROT_EXEC)
 	if err != nil {
 		log.Fatalf("Failed to mark memory as executable: %v", err)
-	}
-
-	// 1. Get the symbol table from the parsed ELF file
-	symbols, err := f.Symbols()
-	if err != nil {
-		log.Fatalf("Failed to read symbols: %v", err)
-	}
-
-	var funcOffset uint64
-	found := false
-
-	// 2. Loop through the symbols to find the one named "add"
-	for _, sym := range symbols {
-		if sym.Name == "add" {
-			// sym.Value is the relative offset from the start of the file
-			funcOffset = sym.Value
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		log.Fatalf("Symbol 'add' not found in ELF file")
 	}
 
 	// 3. Calculate the absolute pointer inside our allocated memory slice
